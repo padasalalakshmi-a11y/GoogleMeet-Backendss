@@ -24,6 +24,9 @@ const io = socketIo(server, config.socketio);
 // Track translation requests per socket for rate limiting
 const translationCounts = new Map();
 
+// Trust proxy for Render deployment (required for rate limiting)
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(cors(config.cors));
 app.use(express.json());
