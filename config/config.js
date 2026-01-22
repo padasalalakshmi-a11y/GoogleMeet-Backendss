@@ -18,7 +18,25 @@ module.exports = {
   
   // CORS settings
   cors: {
-    origin: process.env.FRONTEND_URL || '*',
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      
+      // List of allowed origins
+      const allowedOrigins = [
+        'http://localhost:5173',
+        'http://localhost:3000',
+        'https://googlemeet-frontend.vercel.app',
+        process.env.FRONTEND_URL
+      ].filter(Boolean);
+      
+      // Check if origin is allowed or if it's a Vercel preview URL
+      if (allowedOrigins.includes(origin) || origin.includes('vercel.app')) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     methods: ['GET', 'POST', 'DELETE'],
     credentials: true
   },
@@ -26,7 +44,25 @@ module.exports = {
   // Socket.io settings
   socketio: {
     cors: {
-      origin: process.env.FRONTEND_URL || '*',
+      origin: function (origin, callback) {
+        // Allow requests with no origin
+        if (!origin) return callback(null, true);
+        
+        // List of allowed origins
+        const allowedOrigins = [
+          'http://localhost:5173',
+          'http://localhost:3000',
+          'https://googlemeet-frontend.vercel.app',
+          process.env.FRONTEND_URL
+        ].filter(Boolean);
+        
+        // Check if origin is allowed or if it's a Vercel preview URL
+        if (allowedOrigins.includes(origin) || origin.includes('vercel.app')) {
+          callback(null, true);
+        } else {
+          callback(new Error('Not allowed by CORS'));
+        }
+      },
       methods: ['GET', 'POST']
     },
     pingTimeout: 60000,
