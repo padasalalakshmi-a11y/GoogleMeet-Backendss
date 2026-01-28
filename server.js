@@ -16,6 +16,7 @@ const { apiLimiter, roomCreationLimiter, translationLimiter } = require('./middl
 // Import routes
 const roomRoutes = require('./routes/roomRoutes');
 const translationRoutes = require('./routes/translationRoutes');
+const speechRoutes = require('./routes/speechRoutes');
 
 const app = express();
 const server = http.createServer(app);
@@ -54,6 +55,7 @@ app.get('/health', (req, res) => {
 // API Routes
 app.use('/api/rooms', roomRoutes);
 app.use('/api/translate', translationRoutes);
+app.use('/api/speech', speechRoutes);
 
 // IMPORTANT: Handle /room/:roomCode BEFORE serving static files
 app.get('/room/:roomCode', (req, res) => {
