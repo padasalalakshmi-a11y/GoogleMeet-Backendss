@@ -52,7 +52,7 @@ passport.use(
           googleId: profile.id,
           email: profile.emails[0].value,
           name: profile.displayName,
-          credits: 50,
+          credits: 30,
           plan: 'free'
         })
 

@@ -36,7 +36,7 @@ class AuthController {
         name,
         email,
         password,
-        credits: 50,  // Free 50 credits
+        credits: 30,  // Free 50 credits
         plan: 'free'
       });
       
