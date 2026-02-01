@@ -1,6 +1,9 @@
 // Translation Controller - Handles translation requests
 
-const translateService = require('../services/translateServiceFree');
+// Use Google Translate for better quality (requires API key)
+const translateService = require('../services/googleTranslateService');
+// Fallback to free service if Google fails
+const translateServiceFree = require('../services/translateServiceFree');
 
 class TranslationController {
   async translate(req, res) {
@@ -22,19 +25,34 @@ class TranslationController {
         });
       }
 
-      // Translate
-      const translation = await translateService.translate(
-        text,
-        targetLanguage,
-        sourceLanguage
-      );
+      let translation;
+      let service = 'google';
+
+      // Try Google Translate first (better quality)
+      try {
+        translation = await translateService.translate(
+          text,
+          targetLanguage,
+          sourceLanguage
+        );
+      } catch (googleError) {
+        console.log('⚠️ Google Translate failed, using free service fallback');
+        // Fallback to free service
+        translation = await translateServiceFree.translate(
+          text,
+          targetLanguage,
+          sourceLanguage
+        );
+        service = 'libre';
+      }
 
       res.json({
         success: true,
         original: text,
         translated: translation,
         sourceLanguage,
-        targetLanguage
+        targetLanguage,
+        service // Show which service was used
       });
     } catch (error) {
       console.error('Translation error:', error);

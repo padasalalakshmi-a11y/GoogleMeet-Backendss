@@ -13,7 +13,7 @@ class GoogleTranslateService {
       console.error('❌ Google API key not found!');
     } else {
       console.log('✅ Google Translation service initialized');
-      console.log('   API Key:', this.apiKey.substring(0, 20) + '...');
+      // console.log('   API Key:', this.apiKey.substring(0, 20) + '...');
     }
   }
 
@@ -50,12 +50,24 @@ class GoogleTranslateService {
 
       const startTime = Date.now();
 
-      // Make API request
+      // Make API request - FIXED: Use POST with body, not params
+      const url = `${this.translateApiUrl}?key=${this.apiKey}`;
+      
+      const requestBody = {
+        q: text,
+        target: targetLanguage,
+        format: 'text'
+      };
+
+      // Add source language if specified
+      if (sourceLanguage) {
+        requestBody.source = sourceLanguage;
+      }
+
       const response = await axios.post(
-        this.translateApiUrl,
-        null,
+        url,
+        requestBody,
         {
-          params: params,
           headers: {
             'Content-Type': 'application/json'
           },
@@ -110,13 +122,14 @@ class GoogleTranslateService {
    */
   async detectLanguage(text) {
     try {
+      const url = `${this.translateApiUrl}/detect?key=${this.apiKey}`;
+      
       const response = await axios.post(
-        `${this.translateApiUrl}/detect`,
-        null,
+        url,
+        { q: text },
         {
-          params: {
-            q: text,
-            key: this.apiKey
+          headers: {
+            'Content-Type': 'application/json'
           },
           timeout: 5000
         }

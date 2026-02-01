@@ -42,10 +42,14 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
 
     // Get language from request
     const language = req.body.language || 'en';
+    const targetLanguage = req.body.targetLanguage || null; // Optional translation
     const languageCode = googleSpeechService.getLanguageCode(language);
 
     console.log('📋 Request details:');
-    console.log('   Language:', language, '→', languageCode);
+    console.log('   Source language:', language, '→', languageCode);
+    if (targetLanguage) {
+      console.log('   Target language:', targetLanguage);
+    }
     console.log('   Audio size:', req.file.size, 'bytes');
     console.log('   Audio type:', req.file.mimetype);
 
@@ -58,37 +62,51 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
       });
     }
 
-    // Transcribe audio using Google Speech API
+    // Transcribe audio using Google Speech API (with optional translation)
     console.log('🎤 Calling Google Speech-to-Text API...');
     const startTime = Date.now();
     
-    const transcription = await googleSpeechService.transcribeAudio(
+    const result = await googleSpeechService.transcribeAudio(
       req.file.buffer,
-      languageCode
+      languageCode,
+      targetLanguage
     );
 
     const processingTime = Date.now() - startTime;
 
     console.log('✅ Transcription successful!');
-    console.log('   Text:', transcription);
+    console.log('   Original text:', result.transcript);
+    if (result.translation) {
+      console.log('   Translated text:', result.translation);
+    }
+    console.log('   Confidence:', result.confidence);
     console.log('   Time:', processingTime, 'ms');
     console.log('========================================\n');
 
-    // Return transcription
+    // Return transcription and translation
     res.json({
       success: true,
-      text: transcription,
+      text: result.transcript,
+      translation: result.translation,
+      confidence: result.confidence,
       language: language,
       processingTime: processingTime
     });
 
   } catch (error) {
     console.error('❌ Transcription error:', error.message);
+    console.error('   Error stack:', error.stack);
+    console.error('   Request details:', {
+      audioSize: req.file?.size,
+      language: req.body?.language,
+      targetLanguage: req.body?.targetLanguage
+    });
     console.log('========================================\n');
     
     res.status(500).json({
       success: false,
-      message: error.message || 'Failed to transcribe audio'
+      message: error.message || 'Failed to transcribe audio',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });

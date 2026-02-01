@@ -19,9 +19,9 @@ const sequelize = new Sequelize(process.env.DB_URL, {
   //   if (msg.includes('ERROR')) console.error(msg);
   // },
   pool: {
-    max: 5,
-    min: 0,
-    acquire: 30000,
+    max: 20,        // ✅ FIXED: Increased from 5 to 20 for better concurrency
+    min: 2,         // Keep minimum connections alive
+    acquire: 60000, // Longer timeout for acquiring connection
     idle: 10000
   }
 });

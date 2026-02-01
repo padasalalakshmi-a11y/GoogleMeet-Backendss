@@ -4,9 +4,11 @@ const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const path = require('path');
+const session = require('express-session');
+const passport = require('./config/passport');
 const config = require('./config/config');
 const { testConnection, syncDatabase } = require('./config/database');
-const { RoomModel, ParticipantModel, TranslationLogModel } = require('./models');
+const { RoomModel, ParticipantModel, TranslationLogModel, UserModel, CreditUsageLog } = require('./models');
 const translateService = require('./services/translateServiceFree');
 const roomController = require('./controllers/roomController');
 const { validateUserData } = require('./middleware/validation');
@@ -17,6 +19,9 @@ const { apiLimiter, roomCreationLimiter, translationLimiter } = require('./middl
 const roomRoutes = require('./routes/roomRoutes');
 const translationRoutes = require('./routes/translationRoutes');
 const speechRoutes = require('./routes/speechRoutes');
+const authRoutes = require('./routes/authRoutes');
+const creditRoutes = require('./routes/creditRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
 
 const app = express();
 const server = http.createServer(app);
@@ -25,12 +30,57 @@ const io = socketIo(server, config.socketio);
 // Track translation requests per socket for rate limiting
 const translationCounts = new Map();
 
+// Track active translation sessions for credit deduction
+const activeSessions = new Map(); // socketId -> { userId, roomId, sessionLog, intervalId }
+
+// ✅ FIXED: Periodic cleanup to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  
+  // Clean up old translation counts (older than 5 minutes)
+  for (const [socketId, data] of translationCounts.entries()) {
+    if (now > data.resetTime + 300000) { // 5 minutes old
+      translationCounts.delete(socketId);
+      console.log('🧹 Cleaned up old translation count for:', socketId);
+    }
+  }
+  
+  // Clean up orphaned sessions (older than 1 hour)
+  for (const [socketId, session] of activeSessions.entries()) {
+    if (session.sessionLog && session.sessionLog.createdAt) {
+      const sessionAge = now - new Date(session.sessionLog.createdAt).getTime();
+      if (sessionAge > 3600000) { // 1 hour old
+        console.log('🧹 Cleaning up orphaned session for:', socketId);
+        clearInterval(session.intervalId);
+        activeSessions.delete(socketId);
+      }
+    }
+  }
+  
+  console.log(`🧹 Memory cleanup: ${translationCounts.size} translation counts, ${activeSessions.size} active sessions`);
+}, 300000); // Every 5 minutes
+
 // Trust proxy for Render deployment (required for rate limiting)
 app.set('trust proxy', 1);
 
 // Middleware
 app.use(cors(config.cors));
 app.use(express.json());
+
+// Session configuration for passport
+app.use(session({
+  secret: process.env.JWT_SECRET || 'your-secret-key',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
+
+// Initialize passport
+app.use(passport.initialize());
+app.use(passport.session());
 
 // Serve static files from public folder (for old room page)
 app.use(express.static(path.join(__dirname, '../frontend/react-landing/public')));
@@ -53,9 +103,12 @@ app.get('/health', (req, res) => {
 });
 
 // API Routes
+app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/translate', translationRoutes);
 app.use('/api/speech', speechRoutes);
+app.use('/api/credits', creditRoutes);
+app.use('/api/payments', paymentRoutes);
 
 // IMPORTANT: Handle /room/:roomCode BEFORE serving static files
 app.get('/room/:roomCode', (req, res) => {
@@ -148,20 +201,59 @@ io.on('connection', (socket) => {
   // Join room
   socket.on('join-room', async ({ roomCode, userName, language, speakingLanguage }) => {
     try {
+      // ✅ FIXED: Validate and sanitize all inputs
+      
+      // Validate room code
+      if (!roomCode || typeof roomCode !== 'string' || roomCode.length < 3 || roomCode.length > 50) {
+        socket.emit('error', { message: 'Invalid room code' });
+        return;
+      }
+      
+      // Sanitize room code (alphanumeric, dash, underscore only)
+      const sanitizedRoomCode = roomCode.replace(/[^a-zA-Z0-9-_]/g, '');
+      if (sanitizedRoomCode !== roomCode) {
+        socket.emit('error', { message: 'Room code contains invalid characters' });
+        return;
+      }
+      
+      // Validate user name
+      if (!userName || typeof userName !== 'string' || userName.length < 1 || userName.length > 100) {
+        socket.emit('error', { message: 'Invalid user name' });
+        return;
+      }
+      
+      // Sanitize user name (remove HTML/scripts)
+      const sanitizedUserName = userName.replace(/[<>]/g, '').trim();
+      if (!sanitizedUserName) {
+        socket.emit('error', { message: 'User name cannot be empty' });
+        return;
+      }
+      
+      // Validate languages
+      if (!language || typeof language !== 'string' || language.length > 10) {
+        socket.emit('error', { message: 'Invalid language' });
+        return;
+      }
+      
+      if (!speakingLanguage || typeof speakingLanguage !== 'string' || speakingLanguage.length > 10) {
+        socket.emit('error', { message: 'Invalid speaking language' });
+        return;
+      }
+      
       // Validate user data
-      const validation = validateUserData({ userName, language, speakingLanguage });
+      const validation = validateUserData({ userName: sanitizedUserName, language, speakingLanguage });
       if (!validation.valid) {
         socket.emit('error', { message: validation.message });
         return;
       }
 
-      socket.join(roomCode);
+      socket.join(sanitizedRoomCode);
       
       // Get or create room in database
-      let room = await RoomModel.findByRoomCode(roomCode);
+      let room = await RoomModel.findByRoomCode(sanitizedRoomCode);
       if (!room) {
         room = await RoomModel.create({
-          roomCode,
+          roomCode: sanitizedRoomCode,
           createdBy: 'user',
           active: true
         });
@@ -173,7 +265,7 @@ io.on('connection', (socket) => {
       // Add participant to database
       const participant = await ParticipantModel.create({
         socketId: socket.id,
-        userName,
+        userName: sanitizedUserName,
         language,
         speakingLanguage,
         roomId: room.id,
@@ -183,13 +275,13 @@ io.on('connection', (socket) => {
       // Update participant count
       await room.incrementParticipants();
       
-      console.log(`✅ ${userName} joined room ${roomCode}`);
+      console.log(`✅ ${sanitizedUserName} joined room ${sanitizedRoomCode}`);
       console.log(`   Speaking: ${speakingLanguage}, Wants: ${language}`);
       
       // Notify others in the room
-      socket.to(roomCode).emit('user-joined', {
+      socket.to(sanitizedRoomCode).emit('user-joined', {
         userId: socket.id,
-        userName,
+        userName: sanitizedUserName,
         language,
         speakingLanguage
       });
@@ -209,7 +301,7 @@ io.on('connection', (socket) => {
       
       // Send room info
       socket.emit('room-joined', {
-        roomCode,
+        roomCode: sanitizedRoomCode,
         participantCount: existingParticipants.length
       });
     } catch (error) {
@@ -229,6 +321,166 @@ io.on('connection', (socket) => {
 
   socket.on('ice-candidate', ({ candidate, to }) => {
     socket.to(to).emit('ice-candidate', { candidate, from: socket.id });
+  });
+
+  // Translation session management (Credit System)
+  socket.on('translation-started', async ({ roomCode, userId }) => {
+    try {
+      console.log(`💳 Translation started for socket: ${socket.id}`);
+      
+      // Find participant to get user info
+      const participant = await ParticipantModel.findBySocketId(socket.id);
+      if (!participant) {
+        console.log(`❌ Participant not found for socket: ${socket.id}`);
+        socket.emit('translation-error', { message: 'User not found' });
+        return;
+      }
+
+      // Get user from database (if authenticated)
+      let user = null;
+      if (userId) {
+        user = await UserModel.findByPk(userId);
+      }
+
+      // Check if user has credits (skip for guests)
+      if (user) {
+        if (user.credits <= 0) {
+          console.log(`❌ User ${userId} has no credits`);
+          socket.emit('insufficient-credits', {
+            message: 'You have run out of credits',
+            credits: 0
+          });
+          return;
+        }
+
+        console.log(`✅ User ${userId} has ${user.credits} credits`);
+      }
+
+      // Create credit usage log
+      const sessionLog = await CreditUsageLog.create({
+        userId: user ? user.id : null,
+        roomId: participant.roomId,
+        roomCode: roomCode,
+        startTime: new Date(),
+        translationActive: true,
+        creditsUsed: 0
+      });
+
+      // Start credit deduction timer (every minute)
+      const intervalId = setInterval(async () => {
+        try {
+          if (!user) return; // Skip for guests
+
+          // Reload user to get latest credits
+          await user.reload();
+
+          if (user.credits <= 0) {
+            console.log(`⚠️ User ${user.id} ran out of credits during session`);
+            
+            // Stop the session
+            clearInterval(intervalId);
+            activeSessions.delete(socket.id);
+            
+            // End the log
+            await sessionLog.endSession();
+            
+            // Notify frontend
+            socket.emit('credits-depleted', {
+              message: 'You have run out of credits',
+              credits: 0
+            });
+            
+            return;
+          }
+
+          // Deduct 1 credit
+          await user.deductCredits(1);
+          await user.reload();
+
+          // Update session log
+          sessionLog.creditsUsed += 1;
+          await sessionLog.save();
+
+          console.log(`💳 Deducted 1 credit from user ${user.id}. Remaining: ${user.credits}`);
+
+          // Send credit update to frontend
+          socket.emit('credit-update', {
+            credits: user.credits,
+            used: sessionLog.creditsUsed
+          });
+
+          // Warn if credits are low
+          if (user.credits <= 10 && user.credits > 0) {
+            socket.emit('low-credits-warning', {
+              message: `You have ${user.credits} credits remaining`,
+              credits: user.credits
+            });
+          }
+        } catch (error) {
+          console.error('Error in credit deduction interval:', error);
+        }
+      }, 60000); // Every 60 seconds (1 minute)
+
+      // Store active session
+      activeSessions.set(socket.id, {
+        userId: user ? user.id : null,
+        roomId: participant.roomId,
+        sessionLog,
+        intervalId
+      });
+
+      // Send confirmation to frontend
+      socket.emit('translation-session-started', {
+        credits: user ? user.credits : null,
+        message: 'Translation started'
+      });
+
+      console.log(`✅ Translation session started for socket: ${socket.id}`);
+    } catch (error) {
+      console.error('Error starting translation session:', error);
+      socket.emit('translation-error', { message: 'Failed to start translation' });
+    }
+  });
+
+  socket.on('translation-stopped', async () => {
+    try {
+      console.log(`⏹️ Translation stopped for socket: ${socket.id}`);
+      
+      const session = activeSessions.get(socket.id);
+      if (!session) {
+        console.log(`   No active session found`);
+        return;
+      }
+
+      // Stop the interval
+      clearInterval(session.intervalId);
+
+      // End the session log
+      const creditsUsed = await session.sessionLog.endSession();
+
+      // Remove from active sessions
+      activeSessions.delete(socket.id);
+
+      // Get final user credits
+      let finalCredits = null;
+      if (session.userId) {
+        const user = await UserModel.findByPk(session.userId);
+        if (user) {
+          finalCredits = user.credits;
+        }
+      }
+
+      // Send confirmation to frontend
+      socket.emit('translation-session-ended', {
+        creditsUsed,
+        credits: finalCredits,
+        message: 'Translation stopped'
+      });
+
+      console.log(`✅ Translation session ended. Credits used: ${creditsUsed}`);
+    } catch (error) {
+      console.error('Error stopping translation session:', error);
+    }
   });
 
   // Real-time transcription and translation
@@ -358,6 +610,21 @@ io.on('connection', (socket) => {
     // Clean up rate limiting data
     translationCounts.delete(socket.id);
     
+    // ✅ FIXED: Always clean up session, even if endSession fails
+    const session = activeSessions.get(socket.id);
+    if (session) {
+      console.log(`   Stopping active translation session`);
+      try {
+        clearInterval(session.intervalId);
+        await session.sessionLog.endSession();
+      } catch (error) {
+        console.error('⚠️ Error ending session:', error.message);
+      } finally {
+        // ALWAYS remove from Map, even if endSession fails
+        activeSessions.delete(socket.id);
+      }
+    }
+    
     try {
       // Find participant
       const participant = await ParticipantModel.findBySocketId(socket.id);
@@ -379,6 +646,27 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.error('Error handling disconnect:', error);
     }
+  });
+
+  // ✅ Screen sharing events
+  socket.on('screen-share-started', ({ roomCode, userId }) => {
+    console.log('🖥️ Screen share started by:', userId);
+    socket.to(roomCode).emit('screen-share-started', { userId });
+  });
+
+  socket.on('screen-share-stopped', ({ roomCode }) => {
+    console.log('🖥️ Screen share stopped');
+    socket.to(roomCode).emit('screen-share-stopped');
+  });
+
+  // ✅ Emoji reactions
+  socket.on('emoji-reaction', ({ roomCode, emoji, reactionId }) => {
+    console.log('😊 Emoji reaction:', emoji, 'from:', socket.id);
+    socket.to(roomCode).emit('emoji-reaction', {
+      emoji,
+      reactionId,
+      from: socket.id
+    });
   });
 });
 
